@@ -30,9 +30,33 @@ def part1_calculate_T_pose(bvh_file_path):
     Tips:
         joint_name顺序应该和bvh一致
     """
-    joint_name = None
-    joint_parent = None
-    joint_offset = None
+    with open(bvh_file_path, 'r') as f:
+        words = ' '.join(f.readlines()).split()
+        joint_name = []
+        joint_parent = []
+        joint_offset = []
+        parent = -1
+        for i in range(len(words)):
+            if words[i] == 'ROOT':
+                joint_name.append(words[i+1])
+                joint_parent.append(parent)
+                parent = len(joint_name) - 1
+                joint_offset.append([float(x) for x in words[i+4:i+7]])
+            elif words[i] == 'JOINT':
+                joint_name.append(words[i+1])
+                joint_parent.append(parent)
+                parent = len(joint_name) - 1
+                joint_offset.append([float(x) for x in words[i+4:i+7]])
+            elif words[i] == 'End':
+                joint_name.append(joint_name[parent] + '_end')
+                joint_parent.append(parent)
+                parent = len(joint_name) - 1
+                joint_offset.append([float(x) for x in words[i+4:i+7]])
+            elif words[i] == '}':
+                parent = joint_parent[parent]
+            elif words[i] == 'MOTION':
+                break
+        joint_offset = np.array(joint_offset)
     return joint_name, joint_parent, joint_offset
 
 
@@ -48,8 +72,28 @@ def part2_forward_kinematics(joint_name, joint_parent, joint_offset, motion_data
         1. joint_orientations的四元数顺序为(x, y, z, w)
         2. from_euler时注意使用大写的XYZ
     """
-    joint_positions = None
-    joint_orientations = None
+    joint_positions = []
+    joint_orientations = []
+    x = 0
+    data = motion_data[frame_id]
+    for i in range(len(joint_name)):
+        p = joint_parent[i]
+        if p == -1:
+            joint_positions.append(data[x:x+3])
+            x += 3
+            joint_orientations.append(R.from_euler('XYZ', data[x:x+3], degrees=True).as_quat())
+            x += 3
+        elif joint_name[i].endswith('_end'):
+            joint_positions.append(joint_positions[p] + R.from_quat(joint_orientations[p]).apply(joint_offset[i]))
+            joint_orientations.append(joint_orientations[p])
+        else:
+            joint_positions.append(joint_positions[p] + R.from_quat(joint_orientations[p]).apply(joint_offset[i]))
+            joint_orientations.append((R.from_quat(joint_orientations[p]) * R.from_euler('XYZ', data[x:x+3], degrees=True)).as_quat())
+            x += 3
+    
+    joint_positions = np.array(joint_positions)
+    joint_orientations = np.array(joint_orientations)
+
     return joint_positions, joint_orientations
 
 
@@ -63,5 +107,36 @@ def part3_retarget_func(T_pose_bvh_path, A_pose_bvh_path):
         两个bvh的joint name顺序可能不一致哦(
         as_euler时也需要大写的XYZ
     """
-    motion_data = None
+
+    T_joint_name, T_joint_parent, T_joint_offset = part1_calculate_T_pose(T_pose_bvh_path)
+    A_joint_name, A_joint_parent, A_joint_offset = part1_calculate_T_pose(A_pose_bvh_path)
+
+    rotation = [R.from_euler('XYZ', [0, 0, 0], degrees=True)] * len(T_joint_name)
+    for i in range(len(A_joint_name)-1, -1, -1):
+        p = A_joint_parent[i]
+        Ti = T_joint_name.index(A_joint_name[i])
+        
+        if p != -1:
+            rotation[p] = R.align_vectors([A_joint_offset[i]], [T_joint_offset[Ti]])[0]
+            rotation[i] = rotation[p].inv() * rotation[i]
+
+    T_idx = []
+    x = 0
+    for i in range(len(T_joint_name)):
+        if not T_joint_name[i].endswith('_end'):
+            x += 3
+        T_idx.append(x)
+
+    motion_data = load_motion_data(A_pose_bvh_path)
+    for f in range(len(motion_data)):
+        retarget = motion_data[f].copy()
+        x = 3
+        for i in range(len(A_joint_name)):
+            p = A_joint_parent[i]
+            idx = T_idx[T_joint_name.index(A_joint_name[i])]
+            if not A_joint_name[i].endswith('_end'):
+                retarget[idx:idx+3] = (R.from_euler('XYZ', motion_data[f, x:x+3], degrees=True) * rotation[i]).as_euler('XYZ', degrees=True)
+                x += 3
+        motion_data[f] = retarget
+
     return motion_data
